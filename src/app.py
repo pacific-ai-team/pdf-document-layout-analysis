@@ -24,6 +24,7 @@ controllers = setup_dependencies()
 app = FastAPI()
 Instrumentator().instrument(app).expose(app)
 
+
 @app.get("/")
 async def root():
     return sys.version + " Using GPU: " + str(torch.cuda.is_available())
