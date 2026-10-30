@@ -9,8 +9,94 @@ on:
   pull_request:
     branches: [ main ]
 
+permissions:
+  contents: read
+
+env:
+  CI_RUNTIME_SHARDS: "2"
+
 jobs:
-  build:
+  test-plan:
+    name: Test history plan
+    runs-on: ${{ vars.CI_RUNNER_LABEL || 'ubuntu-latest' }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      epoch: ${{ steps.existing.outputs.epoch }}
+    env:
+      CI_RUNTIME_STORE: github://${{ github.repository }}
+      CI_RUNTIME_SUITE: pdf-document-layout-analysis/test
+      CI_RUNTIME_REVISION: ${{ github.sha }}
+      CI_RUNTIME_RUN: ${{ github.run_id }}
+      CI_RUNTIME_GITHUB_TOKEN: ${{ github.token }}
+      CI_RUNTIME_STATE: .ci-runtime/plan
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.11"
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7
+      - uses: ./.github/actions/ci-runtime # zizmor: ignore[self-repository] -- actionlint 1.7.12 does not support $/ syntax
+      # A fixed run-id artifact freezes timing history across every rerun attempt.
+      - name: Find this workflow's immutable plan
+        id: existing
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd
+        with:
+          script: |
+            const run_id = Number(process.env.GITHUB_RUN_ID);
+            const run = await github.rest.actions.getWorkflowRun({...context.repo, run_id});
+            core.setOutput('epoch', run.data.created_at);
+            const artifacts = await github.paginate(github.rest.actions.listWorkflowRunArtifacts,
+              {...context.repo, run_id, per_page: 100});
+            const found = artifacts.filter(a => a.name === `test-history-plan-${run_id}` && !a.expired);
+            if (found.length > 1) throw new Error('Ambiguous history plan');
+            if (!found.length && Number(process.env.GITHUB_RUN_ATTEMPT) > 1)
+              throw new Error('Original history plan is missing; start a new workflow run');
+            core.setOutput('artifact', found[0]?.id || '');
+      - if: steps.existing.outputs.artifact != ''
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: ${{ steps.existing.outputs.artifact }}
+          merge-multiple: true
+          path: .ci-runtime/plan
+      - if: steps.existing.outputs.artifact == ''
+        name: Freeze measured history once
+        env:
+          CI_RUNTIME_EPOCH: ${{ steps.existing.outputs.epoch }}
+        run: uv run --isolated --no-project --with coverage python -m ci_runtime history-plan
+      - if: steps.existing.outputs.artifact == ''
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: test-history-plan-${{ github.run_id }}
+          path: .ci-runtime/plan/history-plan.json
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+
+  test-shards:
+    needs: test-plan
+    permissions:
+      contents: read
+      actions: read
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1]
+    env:
+      CI_RUNTIME_STORE: github://${{ github.repository }}
+      CI_RUNTIME_SUITE: pdf-document-layout-analysis/test
+      CI_RUNTIME_REVISION: ${{ github.sha }}
+      CI_RUNTIME_RUN: ${{ github.run_id }}
+      CI_RUNTIME_GITHUB_TOKEN: ${{ github.token }}
+      CI_RUNTIME_EPOCH: ${{ needs.test-plan.outputs.epoch }}
+      CI_RUNTIME_SHARD: ${{ matrix.shard }}
+      CI_RUNTIME_STATE: ${{ github.workspace }}/.ci-runtime/tests
+      CI_RUNTIME_HISTORY_FILE: ${{ github.workspace }}/.ci-runtime/plan/history-plan.json
+
 
     runs-on: ubuntu-latest
 
@@ -45,5 +131,33 @@ jobs:
         timeout: 120000
         interval: 500
 
+    - name: Identify the exact service image used by this attempt
+      run: |
+        image_id=$(docker inspect --format '{{.Image}}' pdf-document-layout-analysis)
+        echo "CI_RUNTIME_CONTEXT=${image_id}" >> "$GITHUB_ENV"
+
+    - uses: ./.github/actions/ci-runtime # zizmor: ignore[self-repository] -- local vendored artifact bridge
+    - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+      with:
+        name: test-history-plan-${{ github.run_id }}
+        path: .ci-runtime/plan
+    - name: Install checkpoint support
+      run: .venv/bin/python -m pip install coverage
+
     - name: Test with unittest
-      run: just test
+      run: |
+        export PYTHONPATH="${GITHUB_WORKSPACE}"
+        cd src
+        ../.venv/bin/python -m pytest -p ci_runtime.pytest_plugin
+
+  build:
+    needs: [test-plan, test-shards]
+    if: always()
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Require formatting, service readiness and both test shards
+        env:
+          PLAN_RESULT: ${{ needs.test-plan.result }}
+          TEST_RESULT: ${{ needs.test-shards.result }}
+        run: test "$PLAN_RESULT" = success && test "$TEST_RESULT" = success

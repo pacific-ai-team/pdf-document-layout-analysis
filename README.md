@@ -1016,3 +1016,17 @@ We welcome contributions to improve the PDF Document Layout Analysis service!
 ### License
 
 This project is licensed under the terms specified in the [LICENSE](LICENSE) file.
+
+## CI timing and recovery
+
+CI freezes one timing plan for the workflow run and assigns complete pytest
+files to two workers. Each worker retains the existing formatting gate, model
+service build and API readiness check. Completed files can be restored on
+failed-job reruns only when the tested revision, invocation, collection, Python
+version and exact running service image still match. Model/service startup is
+repeated; no live service state is restored.
+
+The `CI_RUNTIME_SHARDS` count and shard matrix must stay aligned. The generated
+`ci_runtime/` package is refreshed and linted by its owner in Pacific Deploy.
+Large files and model startup can dominate the critical path, so additional
+workers do not imply an equivalent reduction in overall workflow time.
