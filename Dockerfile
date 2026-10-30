@@ -33,6 +33,7 @@ RUN uv run python src/download_models.py
 
 RUN uv run python -c "import detectron2; print(f'detectron2 installed at: {detectron2.__file__}')"
 
-ENV PYTHONPATH="${PYTHONPATH}:/app/src"
+ENV PYTHONPATH="${PYTHONPATH}:/app:/app/src"
 ENV TRANSFORMERS_VERBOSITY=error
 ENV TRANSFORMERS_NO_ADVISORY_WARNINGS=1
+ENV PATH="/app/.venv/bin:${PATH}"
